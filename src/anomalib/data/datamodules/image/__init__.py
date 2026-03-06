@@ -37,6 +37,7 @@ from .datumaro import Datumaro
 from .folder import Folder
 from .kolektor import Kolektor
 from .mpdd import MPDD
+from .multimodalad import MultiModalDataModule
 from .mvtec_loco import MVTecLOCO
 from .mvtecad import MVTec, MVTecAD
 from .mvtecad2 import MVTecAD2
@@ -58,6 +59,7 @@ class ImageDataFormat(str, Enum):
     - ``FOLDER_3D``: Custom folder structure for 3D images
     - ``KOLEKTOR``: Kolektor Surface-Defect Dataset
     - ``MPDD``: Metal Parts Defect Detection Dataset
+    - ``MULTIMODALDATAMODULE``: Multi-modal dataset with image and tabular data
     - ``MVTEC_AD``: MVTec AD Dataset
     - ``MVTEC_AD_2``: MVTec AD 2 Dataset
     - ``MVTEC_3D``: MVTec 3D AD Dataset
@@ -76,6 +78,7 @@ class ImageDataFormat(str, Enum):
     FOLDER_3D = "folder_3d"
     KOLEKTOR = "kolektor"
     MPDD = "mpdd"
+    MULTIMODALDATAMODULE = "multimodaldatamodule"
     MVTEC_AD = "mvtecad"
     MVTEC_AD_2 = "mvtecad2"
     MVTEC_3D = "mvtec_3d"
@@ -94,6 +97,7 @@ __all__ = [
     "Folder",
     "Kolektor",
     "MPDD",
+    "MultiModalDataModule",
     "MVTec",  # Include MVTec for backward compatibility
     "MVTecAD",
     "MVTecAD2",

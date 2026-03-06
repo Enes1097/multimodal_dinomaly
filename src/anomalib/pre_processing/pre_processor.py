@@ -78,6 +78,25 @@ class PreProcessor(nn.Module, Callback):
         self.transform = transform
         self.export_transform = get_exportable_transform(self.transform)
 
+    def _apply_transform_to_batch(self, batch):
+        """Apply self.transform to all tensor items in a dict batch, or to .image/.gt_mask if Batch."""
+        if self.transform is None:
+            return batch
+
+        # If batch is a dict (multimodal) --> Here you can implement modality-specific transforms if needed
+        if isinstance(batch, dict):
+            # Don't transform label or path fields
+            skip_keys = {"label", "image_path"}
+            for k, v in batch.items():
+                if k not in skip_keys and isinstance(v, torch.Tensor):
+                    batch[k] = self.transform(v)
+            return batch
+
+        # If batch is a Batch object (unimodal)
+        if hasattr(batch, "image"):
+            batch.image = self.transform(batch.image)
+        return batch
+    
     def on_train_batch_start(
         self,
         trainer: Trainer,
@@ -88,7 +107,7 @@ class PreProcessor(nn.Module, Callback):
         """Apply transforms to the batch of tensors during training."""
         del trainer, pl_module, batch_idx  # Unused
         if self.transform:
-            batch.image, batch.gt_mask = self.transform(batch.image, batch.gt_mask)
+            batch = self._apply_transform_to_batch(batch)
 
     def on_validation_batch_start(
         self,
@@ -100,7 +119,7 @@ class PreProcessor(nn.Module, Callback):
         """Apply transforms to the batch of tensors during validation."""
         del trainer, pl_module, batch_idx  # Unused
         if self.transform:
-            batch.image, batch.gt_mask = self.transform(batch.image, batch.gt_mask)
+            batch = self._apply_transform_to_batch(batch)
 
     def on_test_batch_start(
         self,
@@ -113,7 +132,7 @@ class PreProcessor(nn.Module, Callback):
         """Apply transforms to the batch of tensors during testing."""
         del trainer, pl_module, batch_idx, dataloader_idx  # Unused
         if self.transform:
-            batch.image, batch.gt_mask = self.transform(batch.image, batch.gt_mask)
+            batch = self._apply_transform_to_batch(batch)
 
     def on_predict_batch_start(
         self,
@@ -126,7 +145,7 @@ class PreProcessor(nn.Module, Callback):
         """Apply transforms to the batch of tensors during prediction."""
         del trainer, pl_module, batch_idx, dataloader_idx  # Unused
         if self.transform:
-            batch.image, batch.gt_mask = self.transform(batch.image, batch.gt_mask)
+            batch = self._apply_transform_to_batch(batch)
 
     def forward(self, batch: torch.Tensor) -> torch.Tensor:
         """Apply transforms to the batch of tensors for inference.

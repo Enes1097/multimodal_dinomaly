@@ -48,7 +48,7 @@ from torch.nn.init import trunc_normal_
 from torchvision.transforms.v2 import CenterCrop, Compose, Normalize, Resize
 
 from anomalib import LearningType
-from anomalib.data import Batch
+from anomalib.data import Batch, InferenceBatch, ImageBatch
 from anomalib.metrics import Evaluator
 from anomalib.models.components import AnomalibModule
 from anomalib.models.image.dinomaly.components import StableAdamW, WarmCosineScheduler
@@ -202,8 +202,8 @@ class Dinomaly(AnomalibModule):
         """Configure the default pre-processor for Dinomaly.
 
         Sets up image preprocessing pipeline including resizing, center cropping,
-        and normalization with ImageNet statistics. The preprocessing is optimized
-        for DINOv2 Vision Transformer models.
+        and normalization with ImageNet statistics. The preprocessing follows the
+        paper's approach: resize to 448x448 then center-crop to 392x392.
 
         Args:
             image_size (tuple[int, int] | None): Target size for image resizing
@@ -221,24 +221,64 @@ class Dinomaly(AnomalibModule):
             The default ImageNet normalization statistics are used:
             - Mean: [0.485, 0.456, 0.406]
             - Std: [0.229, 0.224, 0.225]
+
+            As per the paper, images are resized to 448x448 then center-cropped to 392x392.
+            The model handles the cropping offset during visualization.
+            See: https://github.com/open-edge-platform/anomalib/issues/3129
         """
         crop_size = crop_size or DEFAULT_CROP_SIZE
         image_size = image_size or (DEFAULT_IMAGE_SIZE, DEFAULT_IMAGE_SIZE)
 
         # Validate inputs
-        if crop_size > min(image_size):
-            msg = f"Crop size {crop_size} cannot be larger than image size {image_size}"
-            raise ValueError(msg)
+        #if crop_size > min(image_size):
+        #    msg = f"Crop size {crop_size} cannot be larger than image size {image_size}"
+        #    raise ValueError(msg)
 
         data_transforms = Compose([
             Resize(image_size),
-            CenterCrop(crop_size),
+            #CenterCrop(crop_size),
             Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
 
         return PreProcessor(transform=data_transforms)
+    
+    def _build_model_input(self, batch) -> torch.Tensor | dict[str, torch.Tensor]:
+        """Build model input from either Anomalib Batch class or plain dict."""
 
-    def training_step(self, batch: Batch, *args, **kwargs) -> STEP_OUTPUT:
+        def _has(field: str) -> bool:
+            if hasattr(batch, field):
+                val = getattr(batch, field)
+                return val is not None
+            if isinstance(batch, dict):
+                return field in batch and batch[field] is not None
+            return False
+
+        def _get(field: str):
+            return getattr(batch, field) if hasattr(batch, field) else batch[field]
+        
+        # --- Standard Anomalib: nur "image" vorhanden beim Starten mit FolderDataset---
+        if _has("image") and not any(_has(m) for m in ("thermal", "rgb", "seg_mask", "ambient")):
+            return _get("image")
+        
+        # --- Unimodal thermal only beim Starten mit MultiModalFolderDataset ---
+        if _has("thermal") and not any(_has(m) for m in ("rgb", "seg_mask", "ambient")):
+            return _get("thermal")
+
+        # --- Multimodal beim Starten mit MultiModalFolderDataset ---
+        inputs: dict[str, torch.Tensor] = {}
+        for modality in ("thermal", "rgb", "seg_mask", "ambient"):
+            if _has(modality):
+                inputs[modality] = _get(modality)
+                
+        if not inputs:
+            # Fallback auf "image"
+            if _has("image"):
+                return _get("image")
+            raise ValueError("No valid modalities found in batch")
+
+        return inputs
+
+    def training_step(self, batch, *args, **kwargs) -> STEP_OUTPUT:
         """Training step for the Dinomaly model.
 
         Performs a single training iteration by computing feature reconstruction loss
@@ -262,12 +302,13 @@ class Dinomaly(AnomalibModule):
             on increasingly difficult examples as training progresses.
         """
         del args, kwargs  # These variables are not used.
-        loss = self.model(batch.image, global_step=self.global_step)
+        model_input = self._build_model_input(batch)
+        loss = self.model(model_input, global_step=self.global_step)
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
 
         return {"loss": loss}
 
-    def validation_step(self, batch: Batch, *args, **kwargs) -> STEP_OUTPUT:
+    def validation_step(self, batch, *args, **kwargs) -> STEP_OUTPUT:
         """Validation step for the Dinomaly model.
 
         Performs inference on the validation batch to compute anomaly scores
@@ -291,10 +332,46 @@ class Dinomaly(AnomalibModule):
             scores and maps computed from encoder-decoder feature comparisons.
         """
         del args, kwargs  # These variables are not used.
+        model_input = self._build_model_input(batch)
+        predictions = self.model(model_input)
+        pred_score = predictions.pred_score
+        anomaly_map = predictions.anomaly_map
+        print("pred_score=", pred_score)
+        print("anomaly_map=", anomaly_map)
 
-        predictions = self.model(batch.image)
-        return batch.update(pred_score=predictions.pred_score, anomaly_map=predictions.anomaly_map)
+        img_batch = ImageBatch(image=batch["image"] if "image" in batch else batch["thermal"])
+        print("img_batch=", img_batch)
+        print("img_batch_size=", img_batch.image.shape)
+        return img_batch.update()
 
+        #return InferenceBatch(
+            #image=batch["thermal"] if "thermal" in batch else batch["image"],
+            #gt_label=batch.get("label"),
+            #gt_mask=batch.get("mask"),
+        #    pred_score=pred_score,
+        #    anomaly_map=anomaly_map,
+            #image_path=batch.get("image_path"),
+        #)
+    '''
+    def test_step(self, batch, *args, **kwargs) -> STEP_OUTPUT:
+        del args, kwargs
+        model_input = self._build_model_input(batch)
+        predictions = self.model(model_input)
+
+        def _get(field: str, default=None):
+            if hasattr(batch, field):
+                return getattr(batch, field)
+            if isinstance(batch, dict) and field in batch:
+                return batch[field]
+            return default
+
+        out = {
+            "pred_score": predictions.pred_score,
+            "anomaly_map": predictions.anomaly_map,
+            "gt_label": _get("label"),
+        }
+        return out
+    '''
     def configure_optimizers(self) -> OptimizerLRScheduler:
         """Configure optimizer and learning rate scheduler for Dinomaly training.
 

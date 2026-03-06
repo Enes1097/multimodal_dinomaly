@@ -11,6 +11,7 @@ datasets:
 - ``DatumaroDataset``: Dataset in Datumaro format (Intel Geti™ export)
 - ``FolderDataset``: Custom dataset from folder structure
 - ``KolektorDataset``: Kolektor surface defect dataset
+- ``MultiModalFolderDataset``: Custom multimodal dataset from folder structure
 - ``MVTecADDataset``: MVTec AD dataset with industrial objects
 - ``MVTecLOCODataset``: MVTec LOCO dataset with logical and structural anomalies
 - ``TabularDataset``: Custom tabular dataset with image paths and labels
@@ -32,6 +33,7 @@ from .datumaro import DatumaroDataset
 from .folder import FolderDataset
 from .kolektor import KolektorDataset
 from .mpdd import MPDDDataset
+from .multimodalad import MultiModalFolderDataset
 from .mvtec_loco import MVTecLOCODataset
 from .mvtecad import MVTecADDataset, MVTecDataset
 from .mvtecad2 import MVTecAD2Dataset
@@ -47,6 +49,7 @@ __all__ = [
     "FolderDataset",
     "KolektorDataset",
     "MPDDDataset",
+    "MultiModalFolderDataset",
     "MVTecDataset",
     "MVTecADDataset",
     "MVTecAD2Dataset",

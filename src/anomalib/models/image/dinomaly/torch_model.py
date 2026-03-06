@@ -44,7 +44,7 @@ DEFAULT_FUSE_LAYERS = [[0, 1, 2, 3], [4, 5, 6, 7]]
 DEFAULT_RESIZE_SIZE = 256
 DEFAULT_GAUSSIAN_KERNEL_SIZE = 5
 DEFAULT_GAUSSIAN_SIGMA = 4
-DEFAULT_MAX_RATIO = 0.01
+DEFAULT_MAX_RATIO = 0.01 #For Real-IAD with tiny anomalies use 0.001
 
 # Transformer architecture constants
 TRANSFORMER_CONFIG: dict[str, float | bool] = {
@@ -203,11 +203,13 @@ class DinomalyModel(nn.Module):
                 - en: List of fused encoder features reshaped to spatial dimensions
                 - de: List of fused decoder features reshaped to spatial dimensions
         """
+        # Prepare tokens
         x = self.encoder.prepare_tokens(x)
 
         encoder_features = []
         decoder_features = []
-
+        
+        # Go over encoder blocks and collect features from target layers
         for i, block in enumerate(self.encoder.blocks):
             if i <= self.target_layers[-1]:
                 with torch.no_grad():
@@ -215,16 +217,19 @@ class DinomalyModel(nn.Module):
             else:
                 continue
             if i in self.target_layers:
-                encoder_features.append(x)
+                encoder_features.append(x) #encoder_features holds features from target middle layers as a list of tensors
         side = int(math.sqrt(encoder_features[0].shape[1] - 1 - self.encoder.num_register_tokens))
 
+        # Remove class token as this was not used in the original Dinomaly implementation
         if self.remove_class_token:
             encoder_features = [e[:, 1 + self.encoder.num_register_tokens :, :] for e in encoder_features]
 
+        # Pass through noisy bottleneck and get decoder input feature
         x = self._fuse_feature(encoder_features)
         for _i, block in enumerate(self.bottleneck):
             x = block(x)
 
+        # Go over decoder blocks with decoder input feature
         # attn_mask is explicitly set to None to disable attention masking.
         # This will not have any effect as it was essentially set to None in the original implementation
         # as well but was configurable to be not None for testing, if required.
@@ -233,6 +238,7 @@ class DinomalyModel(nn.Module):
             decoder_features.append(x)
         decoder_features = decoder_features[::-1]
 
+        # Fuse features from encoder and decoder seperately based on fuse_layer/layer_group configurations
         en = [self._fuse_feature([encoder_features[idx] for idx in idxs]) for idxs in self.fuse_layer_encoder]
         de = [self._fuse_feature([decoder_features[idx] for idx in idxs]) for idxs in self.fuse_layer_decoder]
 
@@ -240,8 +246,91 @@ class DinomalyModel(nn.Module):
         en = self._process_features_for_spatial_output(en, side)
         de = self._process_features_for_spatial_output(de, side)
         return en, de
+    
+    def get_encoder_decoder_outputs_multimodal(self, inputs: dict[str, torch.Tensor]) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        """Multimodal version of get_encoder_decoder_outputs.
 
-    def forward(self, batch: torch.Tensor, global_step: int | None = None) -> torch.Tensor | InferenceBatch:
+        Pipeline (Dinomaly2-style):
+          1) For each modality: run encoder → collect encoder features (token space).
+          2) Fuse encoder features across modalities (element-wise mean) per scale.
+          3) Fuse encoder tokens across modalities to form a single decoder input.
+          4) Run bottleneck + decoder ONCE on the fused tokens.
+          5) Fuse decoder layer groups (as in unimodal case) and reshape to spatial maps.
+
+        Args:
+            inputs: dict mapping modality name -> image tensor of shape (B, C, H, W).
+
+        Returns:
+            (en, de): lists of fused encoder and decoder feature maps (spatial, [B, C, H, W]).
+        """
+        modality_encoder_features = []
+
+        for _name, x in inputs.items():
+            # Prepare tokens & run encoder blocks exactly like in get_encoder_decoder_outputs
+            x = self.encoder.prepare_tokens(x)
+
+            encoder_features = []
+            # Go over encoder blocks and collect features from target layers
+            for i, block in enumerate(self.encoder.blocks):
+                if i <= self.target_layers[-1]:
+                    with torch.no_grad():
+                        x = block(x)
+                else:
+                    continue
+                if i in self.target_layers:
+                    encoder_features.append(x) #encoder_features holds features from target middle layers as a list of tensors
+                    
+            # Append encoder feature of current modality into modality feature list
+            modality_encoder_features.append(encoder_features)
+
+        # All modalities should share same sequence length as thermal image features
+        thermal_encoder_features = modality_encoder_features[0]
+        side = int(math.sqrt(thermal_encoder_features[0].shape[1] - 1 - self.encoder.num_register_tokens))
+
+        # Remove class token as this was not used in the original Dinomaly implementation
+        if self.remove_class_token:
+            modality_encoder_features = [
+                [e[:, 1 + self.encoder.num_register_tokens :, :] for e in enc_feats]
+                for enc_feats in modality_encoder_features
+            ]
+        
+        # Element-wise averaging of each layer features across modalities
+        element_wise_averaged_encoder_features = []
+        for layer_idx in range(len(thermal_encoder_features)): # Iterate over middle layers
+            # Collect features from all modalities for this layer
+            feats_per_modality = [
+                modality_encoder_features[mod_idx][layer_idx]
+                for mod_idx in range(len(modality_encoder_features))
+            ]
+            # Stack and average
+            averaged_layer = self._fuse_feature(feats_per_modality)
+            element_wise_averaged_encoder_features.append(averaged_layer)
+
+        # Pass through noisy bottleneck and get decoder input feature
+        x = self._fuse_feature(element_wise_averaged_encoder_features)
+        for _i, block in enumerate(self.bottleneck):
+            x = block(x)
+
+        # Go over decoder blocks with decoder input feature
+        # attn_mask is explicitly set to None to disable attention masking.
+        # This will not have any effect as it was essentially set to None in the original implementation
+        # as well but was configurable to be not None for testing, if required.
+        decoder_features = []
+        for _i, block in enumerate(self.decoder):
+            x = block(x, attn_mask=None)
+            decoder_features.append(x)
+        decoder_features = decoder_features[::-1]
+
+        # Fuse features from encoder and decoder seperately based on fuse_layer/layer_group configurations
+        en = [self._fuse_feature([element_wise_averaged_encoder_features[idx] for idx in idxs]) for idxs in self.fuse_layer_encoder]
+        de = [self._fuse_feature([decoder_features[idx] for idx in idxs]) for idxs in self.fuse_layer_decoder]
+
+        # Process features for spatial output
+        en = self._process_features_for_spatial_output(en, side)
+        de = self._process_features_for_spatial_output(de, side)
+        return en, de
+
+    def forward(self, batch: torch.Tensor | dict[str, torch.Tensor], global_step: int | None = None) -> torch.Tensor | InferenceBatch:
         """Forward pass of the Dinomaly model.
 
         During training, the model extracts features from the encoder and decoder
@@ -261,9 +350,16 @@ class DinomalyModel(nn.Module):
                   and anomaly_map (pixel-level anomaly maps).
 
         """
-        en, de = self.get_encoder_decoder_outputs(batch)
-        image_size = batch.shape[2]
-
+        # Unimodal input
+        if isinstance(batch, torch.Tensor):
+            en, de = self.get_encoder_decoder_outputs(batch)
+            image_size = batch.shape[2]
+        # Multimodal input
+        elif isinstance(batch, dict):
+            en, de = self.get_encoder_decoder_outputs_multimodal(batch)
+            image_size = batch[next(iter(batch))].shape[2]
+        else:
+            raise TypeError(f"Expected Tensor or dict[str, Tensor], got {type(batch)}")        
         if self.training:
             if global_step is None:
                 error_msg = "global_step must be provided during training"
