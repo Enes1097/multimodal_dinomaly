@@ -137,9 +137,10 @@ class Evaluator(nn.Module, Callback):
         dataloader_idx: int = 0,
     ) -> None:
         """Update validation metrics with the batch output."""
-        del trainer, outputs, batch_idx, dataloader_idx, pl_module  # Unused arguments.
+        del trainer, batch_idx, dataloader_idx, pl_module  # Unused arguments.
+        metric_batch = outputs if outputs is not None else batch
         for metric in self.val_metrics:
-            metric.update(batch)
+            metric.update(metric_batch)
 
     def on_validation_epoch_end(
         self,
@@ -161,9 +162,10 @@ class Evaluator(nn.Module, Callback):
         dataloader_idx: int = 0,
     ) -> None:
         """Update test metrics with the batch output."""
-        del trainer, outputs, batch_idx, dataloader_idx, pl_module  # Unused arguments.
+        del trainer, batch_idx, dataloader_idx, pl_module  # Unused arguments.
+        metric_batch = outputs if outputs is not None else batch
         for metric in self.test_metrics:
-            metric.update(batch)
+            metric.update(metric_batch)
 
     def on_test_epoch_end(
         self,

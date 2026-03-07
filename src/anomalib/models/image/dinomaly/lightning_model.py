@@ -340,8 +340,8 @@ class Dinomaly(AnomalibModule):
         predictions = self.model(model_input)
         pred_score = predictions.pred_score
         anomaly_map = predictions.anomaly_map
-        print("pred_score=", pred_score)
-        print("anomaly_map=", anomaly_map)
+        #print("pred_score=", pred_score)
+        #print("anomaly_map=", anomaly_map)
 
         batch = ImageBatch(
             image=batch["thermal"] if "thermal" in batch else batch["image"],
@@ -350,8 +350,8 @@ class Dinomaly(AnomalibModule):
             image_path=batch.get("image_path"),
             mask_path=batch.get("mask_path"),
         )
-        print("img_batch=", batch)
-        print("img_batch_size=", batch.image.shape)        
+        #print("img_batch=", batch)
+        #print("img_batch_size=", batch.image.shape)        
         return batch.update(
             pred_score=predictions.pred_score,
             anomaly_map=predictions.anomaly_map,
@@ -381,25 +381,46 @@ class Dinomaly(AnomalibModule):
         #    anomaly_map=anomaly_map,
             #image_path=batch.get("image_path"),
         #)
-    '''
-    def test_step(self, batch, *args, **kwargs) -> STEP_OUTPUT:
-        del args, kwargs
+
+    def test_step(self, batch, batch_idx, *args, **kwargs) -> STEP_OUTPUT:
+        """Test step for dict-based multimodal batches."""
+        del batch_idx, args, kwargs
+
         model_input = self._build_model_input(batch)
         predictions = self.model(model_input)
 
-        def _get(field: str, default=None):
-            if hasattr(batch, field):
-                return getattr(batch, field)
-            if isinstance(batch, dict) and field in batch:
-                return batch[field]
-            return default
+        output_batch = ImageBatch(
+            image=batch["thermal"] if "thermal" in batch else batch["image"],
+            gt_label=batch.get("label"),
+            gt_mask=batch.get("mask"),
+            image_path=batch.get("image_path"),
+            mask_path=batch.get("mask_path"),
+        )
 
-        out = {
-            "pred_score": predictions.pred_score,
-            "anomaly_map": predictions.anomaly_map,
-            "gt_label": _get("label"),
-        }
-        return out
+        return output_batch.update(
+            pred_score=predictions.pred_score,
+            anomaly_map=predictions.anomaly_map,
+        )
+    '''
+    def predict_step(self, batch, batch_idx, dataloader_idx=0) -> STEP_OUTPUT:
+        """Predict step for dict-based multimodal batches."""
+        del batch_idx, dataloader_idx
+
+        model_input = self._build_model_input(batch)
+        predictions = self.model(model_input)
+
+        output_batch = ImageBatch(
+            image=batch["thermal"] if "thermal" in batch else batch["image"],
+            gt_label=batch.get("label"),
+            gt_mask=batch.get("mask"),
+            image_path=batch.get("image_path"),
+            mask_path=batch.get("mask_path"),
+        )
+
+        return output_batch.update(
+            pred_score=predictions.pred_score,
+            anomaly_map=predictions.anomaly_map,
+        )
     '''
     def configure_optimizers(self) -> OptimizerLRScheduler:
         """Configure optimizer and learning rate scheduler for Dinomaly training.
