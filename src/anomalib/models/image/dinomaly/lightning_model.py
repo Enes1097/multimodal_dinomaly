@@ -332,6 +332,10 @@ class Dinomaly(AnomalibModule):
             scores and maps computed from encoder-decoder feature comparisons.
         """
         del args, kwargs  # These variables are not used.
+
+        #predictions = self.model(batch.image)
+        #return batch.update(pred_score=predictions.pred_score, anomaly_map=predictions.anomaly_map)
+    
         model_input = self._build_model_input(batch)
         predictions = self.model(model_input)
         pred_score = predictions.pred_score
@@ -339,10 +343,35 @@ class Dinomaly(AnomalibModule):
         print("pred_score=", pred_score)
         print("anomaly_map=", anomaly_map)
 
-        img_batch = ImageBatch(image=batch["image"] if "image" in batch else batch["thermal"])
-        print("img_batch=", img_batch)
-        print("img_batch_size=", img_batch.image.shape)
-        return img_batch.update()
+        batch = ImageBatch(
+            image=batch["thermal"] if "thermal" in batch else batch["image"],
+            gt_label=batch.get("label"),
+            gt_mask=batch.get("mask"),
+            image_path=batch.get("image_path"),
+            mask_path=batch.get("mask_path"),
+        )
+        print("img_batch=", batch)
+        print("img_batch_size=", batch.image.shape)        
+        return batch.update(
+            pred_score=predictions.pred_score,
+            anomaly_map=predictions.anomaly_map,
+        )
+    
+        #inf_batch = InferenceBatch(
+        #    pred_score=pred_score,
+        #    anomaly_map=anomaly_map,
+        #)
+
+        #print("inf_batch=", inf_batch)
+
+        #return inf_batch
+        #all_keys = inf_batch.keys()
+        #print ("pred_score in inf_batch:", "pred_score" in all_keys)
+
+        #img_batch = ImageBatch(image=batch["image"] if "image" in batch else batch["thermal"])
+        #print("img_batch=", img_batch)
+        #print("img_batch_size=", img_batch.image.shape)
+        #return img_batch.update()
 
         #return InferenceBatch(
             #image=batch["thermal"] if "thermal" in batch else batch["image"],
