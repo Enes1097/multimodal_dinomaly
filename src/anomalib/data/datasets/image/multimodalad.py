@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Sequence, Any, Dict
 from PIL import Image
 
@@ -11,14 +12,35 @@ from torchvision.transforms.v2 import Transform
 
 class MultiModalFolderDataset(Dataset):
     """Multimodales Dataset für unsplittete Struktur.
-    Erwartete Struktur:
+
+    Unterstützte Verzeichnisstrukturen:
         root/
-          normal/
-            thermal/*.png
-            rgb/*.png
-          anomalous/
-            thermal/*.png
-            rgb/*.png
+            normal/
+                thermal/**
+                rgb/**
+            anomalous/
+                thermal/**
+                rgb/**
+
+        root/
+            thermal/
+                normal/**
+                anomalous/**
+            rgb/
+                normal/**
+                anomalous/**
+
+    Dateien werden über einen Pairing-Key zusammengeführt. Der Pairing-Key
+    wird standardmäßig aus den letzten beiden numerischen Bestandteilen des
+    Dateinamens abgeleitet. Damit werden z. B. die folgenden Dateien korrekt
+    zusammengeführt:
+
+    - thermal: inspection_payload_thermal_camera_image_<sec>_<nsec>.png
+    - rgb: rgb_image_<rgb_sec>_<rgb_nsec>_<sec>_<nsec>.png
+
+    Für Modalitäten mit nur einem Timestamp im Namen werden ebenfalls die
+    letzten beiden numerischen Bestandteile verwendet.
+
     Args:
         root: Wurzelverzeichnis des Datensatzes.
         modalities: Modalitäts-Namen = Unterordner unter normal/anomalous.
@@ -41,6 +63,38 @@ class MultiModalFolderDataset(Dataset):
         self.samples: list[Dict[str, Any]] = []
         self._build_index()
 
+    def _resolve_modality_dir(self, label_name: str, modality: str) -> Path:
+        """Resolve the directory of a modality for a given label.
+
+        Supports both ``root/label/modality`` and ``root/modality/label``.
+        """
+        candidates = (
+            self.root / label_name / modality,
+            self.root / modality / label_name,
+        )
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        raise FileNotFoundError(
+            "Expected modality folder in one of: "
+            f"{candidates[0]} or {candidates[1]}"
+        )
+
+    def _extract_pairing_key(self, path: Path) -> str:
+        """Extract the modality-independent pairing key from a filename.
+
+        The last timestamp in the filename is used for pairing. For ROS-style
+        timestamps this corresponds to the last two numeric groups
+        ``<sec>_<nsec>``. If fewer numeric groups are present, a best-effort
+        fallback is used.
+        """
+        numeric_parts = re.findall(r"\d+", path.stem)
+        if len(numeric_parts) >= 2:
+            return "_".join(numeric_parts[-2:])
+        if len(numeric_parts) == 1:
+            return numeric_parts[0]
+        return path.stem
+
     def _build_index(self) -> None:
         """Baut self.samples mit allen (normal/anomalous)-Samples und Modalitäten.
 
@@ -58,46 +112,57 @@ class MultiModalFolderDataset(Dataset):
         }
 
         for label_name, label in label_map.items():
-            base_label_dir = self.root / label_name
-            if not base_label_dir.exists():
-                raise FileNotFoundError(f"Expected folder: {base_label_dir}")
-
             modality_files: dict[str, dict[str, Path]] = {}
-            filename_sets: list[set[str]] = []
+            pairing_key_sets: list[set[str]] = []
 
             for modality in self.modalities:
-                mod_dir = base_label_dir / modality
-                if not mod_dir.exists():
-                    raise FileNotFoundError(f"Expected modality folder: {mod_dir}")
+                mod_dir = self._resolve_modality_dir(label_name, modality)
 
                 files_for_mod: dict[str, Path] = {}
-                for path in mod_dir.rglob("*"):
+                for path in sorted(mod_dir.rglob("*")):
                     if not path.is_file():
                         continue
                     if path.suffix.lower() not in self.extensions:
                         continue
-                    files_for_mod[path.name] = path
+
+                    pairing_key = self._extract_pairing_key(path)
+                    existing_path = files_for_mod.get(pairing_key)
+                    if existing_path is not None:
+                        chosen_path = min(
+                            (existing_path, path),
+                            key=lambda candidate: (len(candidate.name), candidate.name),
+                        )
+                        files_for_mod[pairing_key] = chosen_path
+                        print(
+                            f"[WARN] Duplicate pairing key '{pairing_key}' "
+                            f"for label='{label_name}', modality='{modality}'. "
+                            f"Using '{chosen_path.name}'."
+                        )
+                        continue
+
+                    files_for_mod[pairing_key] = path
 
                 modality_files[modality] = files_for_mod
-                filename_sets.append(set(files_for_mod.keys()))
+                pairing_key_sets.append(set(files_for_mod.keys()))
 
-            if not filename_sets:
+            if not pairing_key_sets:
                 continue
 
-            common_filenames = set.intersection(*filename_sets)
-            if len(common_filenames) == 0:
-                print(f"[WARN] No common files for label '{label_name}'")
+            common_pairing_keys = set.intersection(*pairing_key_sets)
+            if len(common_pairing_keys) == 0:
+                print(f"[WARN] No common pairing keys for label '{label_name}'")
 
-            for fname in sorted(common_filenames):
+            for pairing_key in sorted(common_pairing_keys):
                 paths_for_modalities = {
-                    modality: modality_files[modality][fname]
+                    modality: modality_files[modality][pairing_key]
                     for modality in self.modalities
                 }
                 self.samples.append(
                     {
                         "paths": paths_for_modalities,
                         "label": label,
-                        "filename": fname,
+                        "filename": pairing_key,
+                        "pairing_key": pairing_key,
                         "label_name": label_name,
                     }
                 )
