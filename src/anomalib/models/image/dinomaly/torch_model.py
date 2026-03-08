@@ -283,9 +283,9 @@ class DinomalyModel(nn.Module):
             # Append encoder feature of current modality into modality feature list
             modality_encoder_features.append(encoder_features)
 
-        # All modalities should share same sequence length as thermal image features
-        thermal_encoder_features = modality_encoder_features[0]
-        side = int(math.sqrt(thermal_encoder_features[0].shape[1] - 1 - self.encoder.num_register_tokens))
+        # All modalities should share the same token sequence length.
+        reference_encoder_features = modality_encoder_features[0]
+        side = int(math.sqrt(reference_encoder_features[0].shape[1] - 1 - self.encoder.num_register_tokens))
 
         # Remove class token as this was not used in the original Dinomaly implementation
         if self.remove_class_token:
@@ -296,7 +296,7 @@ class DinomalyModel(nn.Module):
         
         # Element-wise averaging of each layer features across modalities
         element_wise_averaged_encoder_features = []
-        for layer_idx in range(len(thermal_encoder_features)): # Iterate over middle layers
+        for layer_idx in range(len(reference_encoder_features)): # Iterate over middle layers
             # Collect features from all modalities for this layer
             feats_per_modality = [
                 modality_encoder_features[mod_idx][layer_idx]

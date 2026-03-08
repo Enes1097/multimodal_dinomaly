@@ -13,15 +13,7 @@ from torchvision.transforms.v2 import Transform
 class MultiModalFolderDataset(Dataset):
     """Multimodales Dataset für unsplittete Struktur.
 
-    Unterstützte Verzeichnisstrukturen:
-        root/
-            normal/
-                thermal/**
-                rgb/**
-            anomalous/
-                thermal/**
-                rgb/**
-
+    Erwartete Verzeichnisstruktur:
         root/
             thermal/
                 normal/**
@@ -63,23 +55,6 @@ class MultiModalFolderDataset(Dataset):
         self.samples: list[Dict[str, Any]] = []
         self._build_index()
 
-    def _resolve_modality_dir(self, label_name: str, modality: str) -> Path:
-        """Resolve the directory of a modality for a given label.
-
-        Supports both ``root/label/modality`` and ``root/modality/label``.
-        """
-        candidates = (
-            self.root / label_name / modality,
-            self.root / modality / label_name,
-        )
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
-        raise FileNotFoundError(
-            "Expected modality folder in one of: "
-            f"{candidates[0]} or {candidates[1]}"
-        )
-
     def _extract_pairing_key(self, path: Path) -> str:
         """Extract the modality-independent pairing key from a filename.
 
@@ -116,7 +91,9 @@ class MultiModalFolderDataset(Dataset):
             pairing_key_sets: list[set[str]] = []
 
             for modality in self.modalities:
-                mod_dir = self._resolve_modality_dir(label_name, modality)
+                mod_dir = self.root / modality / label_name
+                if not mod_dir.exists():
+                    raise FileNotFoundError(f"Expected modality folder: {mod_dir}")
 
                 files_for_mod: dict[str, Path] = {}
                 for path in sorted(mod_dir.rglob("*")):

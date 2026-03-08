@@ -113,6 +113,10 @@ class Dinomaly(AnomalibModule):
             for feature fusion. If None, uses [[0, 1, 2, 3], [4, 5, 6, 7]].
         remove_class_token (bool): Whether to remove class token from features
             before processing. Defaults to False.
+        modalities (list[str] | tuple[str, ...] | None): Optional explicit list
+            of modality names to read from the batch, for example
+            ["thermal", "rgb", "seg_mask", "ambient_images"]. If omitted,
+            modality tensors are inferred dynamically from the batch.
         pre_processor (PreProcessor | bool, optional): Pre-processor instance or
             flag to use default. Defaults to ``True``.
         post_processor (PostProcessor | bool, optional): Post-processor instance
@@ -157,6 +161,7 @@ class Dinomaly(AnomalibModule):
         fuse_layer_encoder: list[list[int]] | None = None,
         fuse_layer_decoder: list[list[int]] | None = None,
         remove_class_token: bool = False,
+        modalities: list[str] | tuple[str, ...] | None = None,
         pre_processor: PreProcessor | bool = True,
         post_processor: PostProcessor | bool = True,
         evaluator: Evaluator | bool = True,
@@ -178,6 +183,7 @@ class Dinomaly(AnomalibModule):
             fuse_layer_decoder=fuse_layer_decoder,
             remove_class_token=remove_class_token,
         )
+        self.modalities = list(modalities) if modalities is not None else None
 
         # Set the trainable parameters for the model.
         # Only the bottleneck and decoder parameters are trained.
@@ -242,41 +248,80 @@ class Dinomaly(AnomalibModule):
 
         return PreProcessor(transform=data_transforms)
     
+    def _get_batch_value(self, batch: Any, field: str) -> Any:
+        """Read a field from either a batch object or dict."""
+
+        if hasattr(batch, field):
+            return getattr(batch, field)
+        if isinstance(batch, dict):
+            return batch.get(field)
+        return None
+
+    def _extract_modality_tensors(self, batch: Any) -> dict[str, torch.Tensor]:
+        """Extract all modality tensors from a batch.
+
+        If ``self.modalities`` is set, only those keys are considered.
+        Otherwise, tensor entries are inferred dynamically while excluding
+        metadata fields such as labels, masks and paths.
+        """
+
+        excluded_fields = {"image", "label", "mask", "image_path", "mask_path", "pred_score", "anomaly_map"}
+
+        if self.modalities is not None:
+            inputs = {
+                modality: tensor
+                for modality in self.modalities
+                if isinstance((tensor := self._get_batch_value(batch, modality)), torch.Tensor)
+            }
+            return inputs
+
+        inputs: dict[str, torch.Tensor] = {}
+
+        if isinstance(batch, dict):
+            items = batch.items()
+        else:
+            items = vars(batch).items() if hasattr(batch, "__dict__") else []
+
+        for field, value in items:
+            if field.startswith("_") or field in excluded_fields:
+                continue
+            if isinstance(value, torch.Tensor) and value.ndim >= 3:
+                inputs[field] = value
+
+        return inputs
+
+    def _select_reference_image(self, batch: Any, model_input: torch.Tensor | dict[str, torch.Tensor]) -> torch.Tensor:
+        """Select one image tensor for visualization/evaluation batches."""
+
+        image = self._get_batch_value(batch, "image")
+        if isinstance(image, torch.Tensor):
+            return image
+
+        if isinstance(model_input, torch.Tensor):
+            return model_input
+
+        if self.modalities is not None:
+            for modality in self.modalities:
+                tensor = model_input.get(modality)
+                if tensor is not None:
+                    return tensor
+
+        return next(iter(model_input.values()))
+
     def _build_model_input(self, batch) -> torch.Tensor | dict[str, torch.Tensor]:
         """Build model input from either Anomalib Batch class or plain dict."""
 
-        def _has(field: str) -> bool:
-            if hasattr(batch, field):
-                val = getattr(batch, field)
-                return val is not None
-            if isinstance(batch, dict):
-                return field in batch and batch[field] is not None
-            return False
+        inputs = self._extract_modality_tensors(batch)
+        if inputs:
+            if len(inputs) == 1:
+                return next(iter(inputs.values()))
+            return inputs
 
-        def _get(field: str):
-            return getattr(batch, field) if hasattr(batch, field) else batch[field]
-        
-        # --- Standard Anomalib: nur "image" vorhanden beim Starten mit FolderDataset---
-        if _has("image") and not any(_has(m) for m in ("thermal", "rgb", "seg_mask", "ambient")):
-            return _get("image")
-        
-        # --- Unimodal thermal only beim Starten mit MultiModalFolderDataset ---
-        if _has("thermal") and not any(_has(m) for m in ("rgb", "seg_mask", "ambient")):
-            return _get("thermal")
+        image = self._get_batch_value(batch, "image")
+        if isinstance(image, torch.Tensor):
+            return image
 
-        # --- Multimodal beim Starten mit MultiModalFolderDataset ---
-        inputs: dict[str, torch.Tensor] = {}
-        for modality in ("thermal", "rgb", "seg_mask", "ambient"):
-            if _has(modality):
-                inputs[modality] = _get(modality)
-                
-        if not inputs:
-            # Fallback auf "image"
-            if _has("image"):
-                return _get("image")
-            raise ValueError("No valid modalities found in batch")
-
-        return inputs
+        raise ValueError("No valid modalities found in batch")
 
     def training_step(self, batch, *args, **kwargs) -> STEP_OUTPUT:
         """Training step for the Dinomaly model.
@@ -340,11 +385,11 @@ class Dinomaly(AnomalibModule):
         predictions = self.model(model_input)
 
         batch = ImageBatch(
-            image=batch["thermal"] if "thermal" in batch else batch["image"],
-            gt_label=batch.get("label"),
-            gt_mask=batch.get("mask"),
-            image_path=batch.get("image_path"),
-            mask_path=batch.get("mask_path"),
+            image=self._select_reference_image(batch, model_input),
+            gt_label=self._get_batch_value(batch, "label"),
+            gt_mask=self._get_batch_value(batch, "mask"),
+            image_path=self._get_batch_value(batch, "image_path"),
+            mask_path=self._get_batch_value(batch, "mask_path"),
         )
         #print("img_batch=", batch)
         #print("img_batch_size=", batch.image.shape)        
@@ -386,11 +431,11 @@ class Dinomaly(AnomalibModule):
         predictions = self.model(model_input)
 
         output_batch = ImageBatch(
-            image=batch["thermal"] if "thermal" in batch else batch["image"],
-            gt_label=batch.get("label"),
-            gt_mask=batch.get("mask"),
-            image_path=batch.get("image_path"),
-            mask_path=batch.get("mask_path"),
+            image=self._select_reference_image(batch, model_input),
+            gt_label=self._get_batch_value(batch, "label"),
+            gt_mask=self._get_batch_value(batch, "mask"),
+            image_path=self._get_batch_value(batch, "image_path"),
+            mask_path=self._get_batch_value(batch, "mask_path"),
         )
 
         return output_batch.update(
@@ -406,11 +451,11 @@ class Dinomaly(AnomalibModule):
         predictions = self.model(model_input)
 
         output_batch = ImageBatch(
-            image=batch["thermal"] if "thermal" in batch else batch["image"],
-            gt_label=batch.get("label"),
-            gt_mask=batch.get("mask"),
-            image_path=batch.get("image_path"),
-            mask_path=batch.get("mask_path"),
+            image=self._select_reference_image(batch, model_input),
+            gt_label=self._get_batch_value(batch, "label"),
+            gt_mask=self._get_batch_value(batch, "mask"),
+            image_path=self._get_batch_value(batch, "image_path"),
+            mask_path=self._get_batch_value(batch, "mask_path"),
         )
 
         return output_batch.update(
