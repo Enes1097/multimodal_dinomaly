@@ -347,12 +347,14 @@ class ImageVisualizer(Visualizer):
         dataloader_idx: int = 0,
     ) -> None:
         """Called when the test batch ends."""
-        del pl_module, outputs, batch_idx, dataloader_idx  # Unused arguments.
+        del pl_module, batch_idx, dataloader_idx  # Unused arguments.
 
         if self.output_dir is None:
             self.output_dir = Path(trainer.default_root_dir) / "images"
 
-        for item in batch:
+        vis_batch = outputs if outputs is not None else batch
+
+        for item in vis_batch:
             image = visualize_image_item(
                 item,
                 fields=self.fields,

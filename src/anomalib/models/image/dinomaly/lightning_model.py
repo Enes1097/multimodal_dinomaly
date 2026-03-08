@@ -338,10 +338,6 @@ class Dinomaly(AnomalibModule):
     
         model_input = self._build_model_input(batch)
         predictions = self.model(model_input)
-        pred_score = predictions.pred_score
-        anomaly_map = predictions.anomaly_map
-        #print("pred_score=", pred_score)
-        #print("anomaly_map=", anomaly_map)
 
         batch = ImageBatch(
             image=batch["thermal"] if "thermal" in batch else batch["image"],
@@ -401,7 +397,7 @@ class Dinomaly(AnomalibModule):
             pred_score=predictions.pred_score,
             anomaly_map=predictions.anomaly_map,
         )
-    '''
+    
     def predict_step(self, batch, batch_idx, dataloader_idx=0) -> STEP_OUTPUT:
         """Predict step for dict-based multimodal batches."""
         del batch_idx, dataloader_idx
@@ -421,7 +417,7 @@ class Dinomaly(AnomalibModule):
             pred_score=predictions.pred_score,
             anomaly_map=predictions.anomaly_map,
         )
-    '''
+    
     def configure_optimizers(self) -> OptimizerLRScheduler:
         """Configure optimizer and learning rate scheduler for Dinomaly training.
 
