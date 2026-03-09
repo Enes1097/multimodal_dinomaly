@@ -37,6 +37,9 @@ class MultiModalFolderDataset(Dataset):
         root: Wurzelverzeichnis des Datensatzes.
         modalities: Modalitäts-Namen = Unterordner unter normal/anomalous.
         extensions: erlaubte Dateiendungen.
+        mask_dir: Optionales Verzeichnis mit Ground-Truth-Masken für thermische
+            Bilder. Masken werden über denselben Pairing-Key wie die Thermalbilder
+            zugeordnet. Fehlende Masken sind erlaubt.
         transform: Optionaler Transform, der auf jede Modalität angewendet wird.
     """
     def __init__(
@@ -44,12 +47,14 @@ class MultiModalFolderDataset(Dataset):
         root: str | Path,
         modalities: Sequence[str] = ("thermal", "rgb"),
         extensions: Sequence[str] = (".png", ".jpg", ".jpeg"),
+        mask_dir: str | Path | None = None,
         transform: Transform | None = None,
     ) -> None:
         super().__init__()
         self.root = Path(root)
         self.modalities = list(modalities)
         self.extensions = tuple(e.lower() for e in extensions)
+        self.mask_dir = Path(mask_dir) if mask_dir is not None else None
         self.transform = transform
 
         self.samples: list[Dict[str, Any]] = []
@@ -85,6 +90,33 @@ class MultiModalFolderDataset(Dataset):
             "normal": 0,
             "anomalous": 1,
         }
+
+        mask_files: dict[str, Path] = {}
+        if self.mask_dir is not None:
+            if not self.mask_dir.exists():
+                raise FileNotFoundError(f"Expected mask folder: {self.mask_dir}")
+
+            for path in sorted(self.mask_dir.rglob("*")):
+                if not path.is_file():
+                    continue
+                if path.suffix.lower() not in self.extensions:
+                    continue
+
+                pairing_key = self._extract_pairing_key(path)
+                existing_path = mask_files.get(pairing_key)
+                if existing_path is not None:
+                    chosen_path = min(
+                        (existing_path, path),
+                        key=lambda candidate: (len(candidate.name), candidate.name),
+                    )
+                    mask_files[pairing_key] = chosen_path
+                    print(
+                        f"[WARN] Duplicate mask pairing key '{pairing_key}'. "
+                        f"Using '{chosen_path.name}'."
+                    )
+                    continue
+
+                mask_files[pairing_key] = path
 
         for label_name, label in label_map.items():
             modality_files: dict[str, dict[str, Path]] = {}
@@ -134,6 +166,7 @@ class MultiModalFolderDataset(Dataset):
                     modality: modality_files[modality][pairing_key]
                     for modality in self.modalities
                 }
+                mask_path = mask_files.get(pairing_key) if label_name == "anomalous" else None
                 self.samples.append(
                     {
                         "paths": paths_for_modalities,
@@ -141,6 +174,7 @@ class MultiModalFolderDataset(Dataset):
                         "filename": pairing_key,
                         "pairing_key": pairing_key,
                         "label_name": label_name,
+                        "mask_path": mask_path,
                     }
                 )
 
@@ -158,10 +192,21 @@ class MultiModalFolderDataset(Dataset):
         img = Image.open(path)
         return img.convert("RGB")
 
+    def _load_mask(self, path: Path) -> torch.Tensor:
+        """Load a binary mask tensor from disk.
+
+        The returned tensor has shape (H, W) and values in {0, 1} whenever the
+        source mask is stored as a conventional binary image.
+        """
+        mask = Image.open(path).convert("L")
+        mask_tensor = torch.as_tensor(list(mask.getdata()), dtype=torch.uint8).reshape(mask.height, mask.width)
+        return (mask_tensor > 0).to(torch.uint8)
+
     def __getitem__(self, index: int) -> Dict[str, Any]:
         sample_info = self.samples[index]
         paths: dict[str, Path] = sample_info["paths"]
         label: int = sample_info["label"]
+        mask_path: Path | None = sample_info.get("mask_path")
 
         images = {
             modality: self._load_image(p)
@@ -187,6 +232,12 @@ class MultiModalFolderDataset(Dataset):
         out["label"] = torch.tensor(label, dtype=torch.long)
         reference_path = paths["thermal"] if "thermal" in paths else next(iter(paths.values()))
         out["image_path"] = str(reference_path)
-        # No mask as I don't have ground truth masks
+
+        if mask_path is not None:
+            out["mask"] = self._load_mask(mask_path)
+            out["mask_path"] = str(mask_path)
+        else:
+            out["mask"] = None
+            out["mask_path"] = None
 
         return out
