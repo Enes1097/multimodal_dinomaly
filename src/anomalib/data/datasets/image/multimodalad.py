@@ -176,14 +176,17 @@ class MultiModalFolderDataset(Dataset):
 
         out: Dict[str, Any] = {}
 
-        if len(images) == 1:
+        for modality, tensor in images.items():
+            out[modality] = tensor
+
+        if "thermal" in images:
+            out["image"] = images["thermal"]
+        elif len(images) == 1:
             out["image"] = next(iter(images.values()))
-        else:
-            for modality, tensor in images.items():
-                out[modality] = tensor
             
         out["label"] = torch.tensor(label, dtype=torch.long)
-        out["image_path"] = str(next(iter(paths.values())))
+        reference_path = paths["thermal"] if "thermal" in paths else next(iter(paths.values()))
+        out["image_path"] = str(reference_path)
         # No mask as I don't have ground truth masks
 
         return out

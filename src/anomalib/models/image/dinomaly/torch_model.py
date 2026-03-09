@@ -84,6 +84,9 @@ class DinomalyModel(nn.Module):
             If None, uses [[0, 1, 2, 3], [4, 5, 6, 7]].
         remove_class_token (bool): Whether to remove class token from features
             before processing. Defaults to False.
+        context_aware_recentering (bool): Whether to apply Dinomaly2-style
+            context-aware recentering by subtracting the class token from each
+            patch token before reconstruction. Defaults to False.
 
     Example:
         >>> model = DinomalyModel(
@@ -103,6 +106,7 @@ class DinomalyModel(nn.Module):
         fuse_layer_encoder: list[list[int]] | None = None,
         fuse_layer_decoder: list[list[int]] | None = None,
         remove_class_token: bool = False,
+        context_aware_recentering: bool = False,
     ) -> None:
         super().__init__()
 
@@ -174,6 +178,7 @@ class DinomalyModel(nn.Module):
         self.fuse_layer_encoder = fuse_layer_encoder
         self.fuse_layer_decoder = fuse_layer_decoder
         self.remove_class_token = remove_class_token
+        self.context_aware_recentering = context_aware_recentering
 
         if not hasattr(self.encoder, "num_register_tokens"):
             self.encoder.num_register_tokens = 0
@@ -186,6 +191,33 @@ class DinomalyModel(nn.Module):
         )
 
         self.loss_fn = CosineHardMiningLoss()
+
+    def _get_patch_tokens(self, feature: torch.Tensor) -> torch.Tensor:
+        """Return patch tokens without class/register tokens."""
+        return feature[:, 1 + self.encoder.num_register_tokens :, :]
+
+    def _apply_context_aware_recentering(self, feature: torch.Tensor) -> torch.Tensor:
+        """Apply Dinomaly2 context-aware recentering to patch tokens.
+
+        The class token is used as a contextual anchor and subtracted from each
+        patch token, while register tokens are excluded from reconstruction.
+        """
+        class_token = feature[:, :1, :]
+        patch_tokens = self._get_patch_tokens(feature)
+        return patch_tokens - class_token
+
+    def _prepare_encoder_features(self, encoder_features: list[torch.Tensor]) -> tuple[list[torch.Tensor], bool]:
+        """Prepare encoder features for reconstruction and anomaly scoring.
+
+        Returns:
+            A tuple of processed features and a flag indicating whether class or
+            register tokens are still present in the returned tensors.
+        """
+        if self.context_aware_recentering:
+            return [self._apply_context_aware_recentering(feature) for feature in encoder_features], False
+        if self.remove_class_token:
+            return [self._get_patch_tokens(feature) for feature in encoder_features], False
+        return encoder_features, True
 
     def get_encoder_decoder_outputs(self, x: torch.Tensor) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Extract and process features through encoder and decoder.
@@ -220,9 +252,7 @@ class DinomalyModel(nn.Module):
                 encoder_features.append(x) #encoder_features holds features from target middle layers as a list of tensors
         side = int(math.sqrt(encoder_features[0].shape[1] - 1 - self.encoder.num_register_tokens))
 
-        # Remove class token as this was not used in the original Dinomaly implementation
-        if self.remove_class_token:
-            encoder_features = [e[:, 1 + self.encoder.num_register_tokens :, :] for e in encoder_features]
+        encoder_features, features_have_special_tokens = self._prepare_encoder_features(encoder_features)
 
         # Pass through noisy bottleneck and get decoder input feature
         x = self._fuse_feature(encoder_features)
@@ -243,29 +273,32 @@ class DinomalyModel(nn.Module):
         de = [self._fuse_feature([decoder_features[idx] for idx in idxs]) for idxs in self.fuse_layer_decoder]
 
         # Process features for spatial output
-        en = self._process_features_for_spatial_output(en, side)
-        de = self._process_features_for_spatial_output(de, side)
+        en = self._process_features_for_spatial_output(en, side, features_have_special_tokens)
+        de = self._process_features_for_spatial_output(de, side, features_have_special_tokens)
         return en, de
     
     def get_encoder_decoder_outputs_multimodal(self, inputs: dict[str, torch.Tensor]) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """Multimodal version of get_encoder_decoder_outputs.
+        """Multimodal forward pass with thermal as anomaly-reference modality.
 
-        Pipeline (Dinomaly2-style):
+        Pipeline:
           1) For each modality: run encoder → collect encoder features (token space).
-          2) Fuse encoder features across modalities (element-wise mean) per scale.
-          3) Fuse encoder tokens across modalities to form a single decoder input.
-          4) Run bottleneck + decoder ONCE on the fused tokens.
-          5) Fuse decoder layer groups (as in unimodal case) and reshape to spatial maps.
+          2) Fuse encoder features across modalities to condition the decoder.
+          3) Run bottleneck + decoder ONCE on the fused tokens.
+          4) Compute anomaly maps against thermal encoder features only.
 
         Args:
             inputs: dict mapping modality name -> image tensor of shape (B, C, H, W).
 
         Returns:
-            (en, de): lists of fused encoder and decoder feature maps (spatial, [B, C, H, W]).
+            (en, de): lists of thermal-reference encoder features and decoder feature
+            maps (spatial, [B, C, H, W]).
         """
-        modality_encoder_features = []
+        if "thermal" not in inputs:
+            raise ValueError("Thermal modality is required for multimodal Dinomaly.")
 
-        for _name, x in inputs.items():
+        modality_encoder_features: dict[str, list[torch.Tensor]] = {}
+
+        for modality_name, x in inputs.items():
             # Prepare tokens & run encoder blocks exactly like in get_encoder_decoder_outputs
             x = self.encoder.prepare_tokens(x)
 
@@ -278,36 +311,33 @@ class DinomalyModel(nn.Module):
                 else:
                     continue
                 if i in self.target_layers:
-                    encoder_features.append(x) #encoder_features holds features from target middle layers as a list of tensors
-                    
-            # Append encoder feature of current modality into modality feature list
-            modality_encoder_features.append(encoder_features)
+                    encoder_features.append(x)  # encoder_features holds features from target middle layers as a list of tensors
 
-        # All modalities should share the same token sequence length.
-        reference_encoder_features = modality_encoder_features[0]
-        side = int(math.sqrt(reference_encoder_features[0].shape[1] - 1 - self.encoder.num_register_tokens))
+            modality_encoder_features[modality_name] = encoder_features
 
-        # Remove class token as this was not used in the original Dinomaly implementation
-        if self.remove_class_token:
-            modality_encoder_features = [
-                [e[:, 1 + self.encoder.num_register_tokens :, :] for e in enc_feats]
-                for enc_feats in modality_encoder_features
-            ]
+        thermal_encoder_features_raw = modality_encoder_features["thermal"]
+        side = int(math.sqrt(thermal_encoder_features_raw[0].shape[1] - 1 - self.encoder.num_register_tokens))
+
+        processed_modality_encoder_features: dict[str, list[torch.Tensor]] = {}
+        features_have_special_tokens = True
+        for modality_name, encoder_features in modality_encoder_features.items():
+            processed_features, features_have_special_tokens = self._prepare_encoder_features(encoder_features)
+            processed_modality_encoder_features[modality_name] = processed_features
+
+        modality_encoder_features = processed_modality_encoder_features
+        thermal_encoder_features = modality_encoder_features["thermal"]
         
         # Element-wise averaging of each layer features across modalities
-        element_wise_averaged_encoder_features = []
-        for layer_idx in range(len(reference_encoder_features)): # Iterate over middle layers
-            # Collect features from all modalities for this layer
+        fused_encoder_features = []
+        for layer_idx in range(len(thermal_encoder_features)):
             feats_per_modality = [
-                modality_encoder_features[mod_idx][layer_idx]
-                for mod_idx in range(len(modality_encoder_features))
+                modality_encoder_features[modality_name][layer_idx]
+                for modality_name in modality_encoder_features
             ]
-            # Stack and average
-            averaged_layer = self._fuse_feature(feats_per_modality)
-            element_wise_averaged_encoder_features.append(averaged_layer)
+            fused_encoder_features.append(self._fuse_feature(feats_per_modality))
 
         # Pass through noisy bottleneck and get decoder input feature
-        x = self._fuse_feature(element_wise_averaged_encoder_features)
+        x = self._fuse_feature(fused_encoder_features)
         for _i, block in enumerate(self.bottleneck):
             x = block(x)
 
@@ -321,13 +351,13 @@ class DinomalyModel(nn.Module):
             decoder_features.append(x)
         decoder_features = decoder_features[::-1]
 
-        # Fuse features from encoder and decoder seperately based on fuse_layer/layer_group configurations
-        en = [self._fuse_feature([element_wise_averaged_encoder_features[idx] for idx in idxs]) for idxs in self.fuse_layer_encoder]
+        # Use thermal encoder features as anomaly reference and multimodal decoder features as target.
+        en = [self._fuse_feature([thermal_encoder_features[idx] for idx in idxs]) for idxs in self.fuse_layer_encoder]
         de = [self._fuse_feature([decoder_features[idx] for idx in idxs]) for idxs in self.fuse_layer_decoder]
 
         # Process features for spatial output
-        en = self._process_features_for_spatial_output(en, side)
-        de = self._process_features_for_spatial_output(de, side)
+        en = self._process_features_for_spatial_output(en, side, features_have_special_tokens)
+        de = self._process_features_for_spatial_output(de, side, features_have_special_tokens)
         return en, de
 
     def forward(self, batch: torch.Tensor | dict[str, torch.Tensor], global_step: int | None = None) -> torch.Tensor | InferenceBatch:
@@ -356,8 +386,10 @@ class DinomalyModel(nn.Module):
             image_size = batch.shape[2]
         # Multimodal input
         elif isinstance(batch, dict):
+            if "thermal" not in batch:
+                raise ValueError("Thermal modality is required in multimodal mode.")
             en, de = self.get_encoder_decoder_outputs_multimodal(batch)
-            image_size = batch[next(iter(batch))].shape[2]
+            image_size = batch["thermal"].shape[2]
         else:
             raise TypeError(f"Expected Tensor or dict[str, Tensor], got {type(batch)}")        
         if self.training:
@@ -473,19 +505,21 @@ class DinomalyModel(nn.Module):
         self,
         features: list[torch.Tensor],
         side: int,
+        features_have_special_tokens: bool,
     ) -> list[torch.Tensor]:
         """Process features for spatial output by removing tokens and reshaping.
 
         Args:
             features: List of feature tensors
             side: Side length for spatial reshaping
+            features_have_special_tokens: Whether features still contain class/register
+                tokens that must be removed before reshaping.
 
         Returns:
             List of processed feature tensors with spatial dimensions
         """
-        # Remove class token and register tokens if not already removed
-        if not self.remove_class_token:
-            features = [f[:, 1 + self.encoder.num_register_tokens :, :] for f in features]
+        if features_have_special_tokens:
+            features = [self._get_patch_tokens(feature) for feature in features]
 
         # Reshape to spatial dimensions
         batch_size = features[0].shape[0]

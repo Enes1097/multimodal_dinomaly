@@ -113,6 +113,9 @@ class Dinomaly(AnomalibModule):
             for feature fusion. If None, uses [[0, 1, 2, 3], [4, 5, 6, 7]].
         remove_class_token (bool): Whether to remove class token from features
             before processing. Defaults to False.
+        context_aware_recentering (bool): Whether to apply Dinomaly2-style
+            context-aware recentering using class-token subtraction before
+            reconstruction. Defaults to False.
         modalities (list[str] | tuple[str, ...] | None): Optional explicit list
             of modality names to read from the batch, for example
             ["thermal", "rgb", "seg_mask", "ambient_images"]. If omitted,
@@ -161,6 +164,7 @@ class Dinomaly(AnomalibModule):
         fuse_layer_encoder: list[list[int]] | None = None,
         fuse_layer_decoder: list[list[int]] | None = None,
         remove_class_token: bool = False,
+        context_aware_recentering: bool = False,
         modalities: list[str] | tuple[str, ...] | None = None,
         pre_processor: PreProcessor | bool = True,
         post_processor: PostProcessor | bool = True,
@@ -182,6 +186,7 @@ class Dinomaly(AnomalibModule):
             fuse_layer_encoder=fuse_layer_encoder,
             fuse_layer_decoder=fuse_layer_decoder,
             remove_class_token=remove_class_token,
+            context_aware_recentering=context_aware_recentering,
         )
         self.modalities = list(modalities) if modalities is not None else None
 
@@ -291,7 +296,16 @@ class Dinomaly(AnomalibModule):
         return inputs
 
     def _select_reference_image(self, batch: Any, model_input: torch.Tensor | dict[str, torch.Tensor]) -> torch.Tensor:
-        """Select one image tensor for visualization/evaluation batches."""
+        """Select thermal as reference image whenever available."""
+
+        thermal = self._get_batch_value(batch, "thermal")
+        if isinstance(thermal, torch.Tensor):
+            return thermal
+
+        if isinstance(model_input, dict):
+            thermal = model_input.get("thermal")
+            if isinstance(thermal, torch.Tensor):
+                return thermal
 
         image = self._get_batch_value(batch, "image")
         if isinstance(image, torch.Tensor):
