@@ -253,7 +253,7 @@ class Dinomaly(AnomalibModule):
 
         return PreProcessor(transform=data_transforms)
     
-    def _get_batch_value(self, batch: Any, field: str) -> Any:
+    def _get_batch_value(self, batch: Any, field: str) -> Any: #Depending on if we use multimodal batches (dicts) or folder batches we have to read data in batches differently
         """Read a field from either a batch object or dict."""
 
         if hasattr(batch, field):
@@ -392,9 +392,6 @@ class Dinomaly(AnomalibModule):
         """
         del args, kwargs  # These variables are not used.
 
-        #predictions = self.model(batch.image)
-        #return batch.update(pred_score=predictions.pred_score, anomaly_map=predictions.anomaly_map)
-    
         model_input = self._build_model_input(batch)
         predictions = self.model(model_input)
 
@@ -405,37 +402,11 @@ class Dinomaly(AnomalibModule):
             image_path=self._get_batch_value(batch, "image_path"),
             mask_path=self._get_batch_value(batch, "mask_path"),
         )
-        #print("img_batch=", batch)
-        #print("img_batch_size=", batch.image.shape)        
+     
         return batch.update(
             pred_score=predictions.pred_score,
             anomaly_map=predictions.anomaly_map,
         )
-    
-        #inf_batch = InferenceBatch(
-        #    pred_score=pred_score,
-        #    anomaly_map=anomaly_map,
-        #)
-
-        #print("inf_batch=", inf_batch)
-
-        #return inf_batch
-        #all_keys = inf_batch.keys()
-        #print ("pred_score in inf_batch:", "pred_score" in all_keys)
-
-        #img_batch = ImageBatch(image=batch["image"] if "image" in batch else batch["thermal"])
-        #print("img_batch=", img_batch)
-        #print("img_batch_size=", img_batch.image.shape)
-        #return img_batch.update()
-
-        #return InferenceBatch(
-            #image=batch["thermal"] if "thermal" in batch else batch["image"],
-            #gt_label=batch.get("label"),
-            #gt_mask=batch.get("mask"),
-        #    pred_score=pred_score,
-        #    anomaly_map=anomaly_map,
-            #image_path=batch.get("image_path"),
-        #)
 
     def test_step(self, batch, batch_idx, *args, **kwargs) -> STEP_OUTPUT:
         """Test step for dict-based multimodal batches."""

@@ -217,7 +217,7 @@ class DinomalyModel(nn.Module):
             return [self._apply_context_aware_recentering(feature) for feature in encoder_features], False
         if self.remove_class_token:
             return [self._get_patch_tokens(feature) for feature in encoder_features], False
-        return encoder_features, True
+        return encoder_features, True #so features_have_special_tokens is True if class/register tokens are still present, False otherwise
 
     def get_encoder_decoder_outputs(self, x: torch.Tensor) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Extract and process features through encoder and decoder.
@@ -320,14 +320,14 @@ class DinomalyModel(nn.Module):
 
         processed_modality_encoder_features: dict[str, list[torch.Tensor]] = {}
         features_have_special_tokens = True
-        for modality_name, encoder_features in modality_encoder_features.items():
+        for modality_name, encoder_features in modality_encoder_features.items(): #Apply for each encoder features of each modality context aware recentering and/or remove class tokens
             processed_features, features_have_special_tokens = self._prepare_encoder_features(encoder_features)
             processed_modality_encoder_features[modality_name] = processed_features
 
         modality_encoder_features = processed_modality_encoder_features
         thermal_encoder_features = modality_encoder_features["thermal"]
         
-        # Element-wise averaging of each layer features across modalities
+        # Element-wise averaging of each layer features across modalities (Guo et al., p.7)
         fused_encoder_features = []
         for layer_idx in range(len(thermal_encoder_features)):
             feats_per_modality = [
@@ -384,6 +384,7 @@ class DinomalyModel(nn.Module):
         if isinstance(batch, torch.Tensor):
             en, de = self.get_encoder_decoder_outputs(batch)
             image_size = batch.shape[2]
+            
         # Multimodal input
         elif isinstance(batch, dict):
             if "thermal" not in batch:
