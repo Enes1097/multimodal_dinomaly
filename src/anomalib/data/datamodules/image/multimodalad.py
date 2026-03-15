@@ -42,6 +42,7 @@ class MultiModalDataModule(LightningDataModule):
         seed: int = 42,
         transform: Optional[Transform] = None,
         balance_object_classes: bool = False,
+        stratify_object_classes: bool = False,
     ) -> None:
         super().__init__()
         self.root = Path(root)
@@ -58,6 +59,7 @@ class MultiModalDataModule(LightningDataModule):
         self.seed = seed
         self.transform = transform
         self.balance_object_classes = balance_object_classes
+        self.stratify_object_classes = stratify_object_classes
 
         self.train_data: Dataset | None = None #empty datasets
         self.val_data: Dataset | None = None
@@ -103,22 +105,71 @@ class MultiModalDataModule(LightningDataModule):
         vr = self.val_ratio_normal
         if tr + vr > 1.0:
             raise ValueError("train_ratio_normal + val_ratio_normal darf nicht > 1.0 sein")
-        n_train = int(N * tr)
-        n_val = int(N * vr)
+        if self.stratify_object_classes:
+            normal_by_class: dict[str, list[int]] = {}
+            for idx in normal_indices:
+                sample = full_dataset.samples[idx]
+                paths = sample.get("paths", {})
+                ref_path = paths.get("thermal") or next(iter(paths.values()))
+                object_class = self._infer_object_class_from_path(Path(ref_path)) or "__unknown__"
+                normal_by_class.setdefault(object_class, []).append(idx)
 
-        train_norm_idx = normal_indices[:n_train]
-        val_norm_idx = normal_indices[n_train:n_train + n_val]
-        test_norm_idx = normal_indices[n_train + n_val:]
+            train_norm_idx: list[int] = []
+            val_norm_idx: list[int] = []
+            test_norm_idx: list[int] = []
+
+            for object_class in sorted(normal_by_class.keys()):
+                idxs = normal_by_class[object_class]
+                rng.shuffle(idxs)
+                n = len(idxs)
+                n_train_c = int(n * tr)
+                n_val_c = int(n * vr)
+                train_norm_idx.extend(idxs[:n_train_c])
+                val_norm_idx.extend(idxs[n_train_c:n_train_c + n_val_c])
+                test_norm_idx.extend(idxs[n_train_c + n_val_c:])
+
+            rng.shuffle(train_norm_idx)
+            rng.shuffle(val_norm_idx)
+            rng.shuffle(test_norm_idx)
+        else:
+            n_train = int(N * tr)
+            n_val = int(N * vr)
+
+            train_norm_idx = normal_indices[:n_train]
+            val_norm_idx = normal_indices[n_train:n_train + n_val]
+            test_norm_idx = normal_indices[n_train + n_val:]
 
         # --- Anomalie-Splits (nur val/test) ---
         M = len(anom_indices)
         va = self.val_ratio_anom
         if va > 1.0:
             raise ValueError("val_ratio_anom darf nicht > 1.0 sein")
-        n_val_anom = int(M * va)
+        if self.stratify_object_classes:
+            anom_by_class: dict[str, list[int]] = {}
+            for idx in anom_indices:
+                sample = full_dataset.samples[idx]
+                paths = sample.get("paths", {})
+                ref_path = paths.get("thermal") or next(iter(paths.values()))
+                object_class = self._infer_object_class_from_path(Path(ref_path)) or "__unknown__"
+                anom_by_class.setdefault(object_class, []).append(idx)
 
-        val_anom_idx = anom_indices[:n_val_anom]
-        test_anom_idx = anom_indices[n_val_anom:]
+            val_anom_idx: list[int] = []
+            test_anom_idx: list[int] = []
+            for object_class in sorted(anom_by_class.keys()):
+                idxs = anom_by_class[object_class]
+                rng.shuffle(idxs)
+                n = len(idxs)
+                n_val_c = int(n * va)
+                val_anom_idx.extend(idxs[:n_val_c])
+                test_anom_idx.extend(idxs[n_val_c:])
+
+            rng.shuffle(val_anom_idx)
+            rng.shuffle(test_anom_idx)
+        else:
+            n_val_anom = int(M * va)
+
+            val_anom_idx = anom_indices[:n_val_anom]
+            test_anom_idx = anom_indices[n_val_anom:]
 
         train_indices = train_norm_idx
         val_indices = val_norm_idx + val_anom_idx
