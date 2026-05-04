@@ -34,6 +34,12 @@ class MultiModalDataModule(LightningDataModule):
         root: str | Path,
         modalities: Sequence[str] = ("thermal", "rgb"),
         extensions: Sequence[str] = (".png", ".jpg", ".jpeg"),
+        anomaly_source_labels: Sequence[str] = ("anomalous",),
+        mask_root: str | Path | None = None,
+        mask_labels: Sequence[str] = (),
+        require_masks_for_mask_labels: bool = True,
+        skip_samples_without_masks_for_mask_labels: bool = False,
+        restrict_normal_to_mask_classes: bool = False,
         train_ratio_normal: float = 0.7,
         val_ratio_normal: float = 0.15,
         val_ratio_anom: float = 0.5,
@@ -52,6 +58,12 @@ class MultiModalDataModule(LightningDataModule):
         self.category: str = "image"
         self.modalities = list(modalities) #Make list from sequence
         self.extensions = tuple(e.lower() for e in extensions) #Same as with dataset only lower case extensions are allowed
+        self.anomaly_source_labels = tuple(dict.fromkeys(anomaly_source_labels))
+        self.mask_root = Path(mask_root) if mask_root is not None else None
+        self.mask_labels = tuple(mask_labels)
+        self.require_masks_for_mask_labels = require_masks_for_mask_labels
+        self.skip_samples_without_masks_for_mask_labels = skip_samples_without_masks_for_mask_labels
+        self.restrict_normal_to_mask_classes = restrict_normal_to_mask_classes
         self.train_ratio_normal = train_ratio_normal
         self.val_ratio_normal = val_ratio_normal
         self.val_ratio_anom = val_ratio_anom
@@ -75,7 +87,7 @@ class MultiModalDataModule(LightningDataModule):
             <root>/<modality>/<normal|anomalous>/<object_class>/.../<file>
         """
         parts = path.parts
-        for label_name in ("normal", "anomalous"):
+        for label_name in ("normal", "anomalous", "hotspot"):
             try:
                 label_index = parts.index(label_name)
             except ValueError:
@@ -108,6 +120,12 @@ class MultiModalDataModule(LightningDataModule):
             modalities=self.modalities,
             extensions=self.extensions,
             transform=self.transform,
+            anomaly_source_labels=self.anomaly_source_labels,
+            mask_root=self.mask_root,
+            mask_labels=self.mask_labels,
+            require_masks_for_mask_labels=self.require_masks_for_mask_labels,
+            skip_samples_without_masks_for_mask_labels=self.skip_samples_without_masks_for_mask_labels,
+            restrict_normal_to_mask_classes=self.restrict_normal_to_mask_classes,
         )
 
         labels = [s["label"] for s in full_dataset.samples] #List of 0s and 1s for all samples
@@ -199,7 +217,10 @@ class MultiModalDataModule(LightningDataModule):
 
         print("[SPLIT]")
         print(f"  normals: total={N}, train={len(train_norm_idx)}, val={len(val_norm_idx)}, test={len(test_norm_idx)}")
-        print(f"  anoms  : total={M}, val={len(val_anom_idx)}, test={len(test_anom_idx)}")
+        print(
+            f"  anomalies ({','.join(self.anomaly_source_labels)}): "
+            f"total={M}, val={len(val_anom_idx)}, test={len(test_anom_idx)}"
+        )
         print(f"  final  : train={len(train_indices)}, val={len(val_indices)}, test={len(test_indices)}")
         print("[SANITY]")
         print(
@@ -227,7 +248,7 @@ class MultiModalDataModule(LightningDataModule):
             print(f"    train: {self._format_counts(train_norm_counts)}")
             print(f"    val  : {self._format_counts(val_norm_counts)}")
             print(f"    test : {self._format_counts(test_norm_counts)}")
-            print("  anoms:")
+            print(f"  anomalies ({','.join(self.anomaly_source_labels)}):")
             print(f"    val  : {self._format_counts(val_anom_counts)}")
             print(f"    test : {self._format_counts(test_anom_counts)}")
 

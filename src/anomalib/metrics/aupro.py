@@ -216,7 +216,8 @@ class _AUPRO(Metric):
             target=target,
             thresholds=thresholds,
         )[0]  # only need fpr
-        output_size = torch.where(fpr <= self.fpr_limit)[0].size(0)
+        fpr_limit = self.fpr_limit.to(device=fpr.device, dtype=fpr.dtype)
+        output_size = torch.where(fpr <= fpr_limit)[0].size(0)
 
         # compute the PRO curve by aggregating per-region tpr/fpr curves/values.
         tpr = torch.zeros(output_size, device=preds.device, dtype=torch.float)
@@ -247,19 +248,19 @@ class _AUPRO(Metric):
             )[:-1]
 
             # catch edge-case where ROC only has fpr vals > self.fpr_limit
-            if fpr_[fpr_ <= self.fpr_limit].max() == 0:
-                fpr_limit_ = fpr_[fpr_ > self.fpr_limit].min()
+            if fpr_[fpr_ <= fpr_limit].max() == 0:
+                fpr_limit_ = fpr_[fpr_ > fpr_limit].min()
             else:
-                fpr_limit_ = self.fpr_limit
+                fpr_limit_ = fpr_limit
 
             fpr_idx_ = torch.where(fpr_ <= fpr_limit_)[0]
             # if computed roc curve is not specified sufficiently close to
             # self.fpr_limit, we include the closest higher tpr/fpr pair and
             # linearly interpolate the tpr/fpr point at self.fpr_limit
-            if not torch.allclose(fpr_[fpr_idx_].max(), self.fpr_limit):
-                tmp_idx_ = torch.searchsorted(fpr_, self.fpr_limit)
+            if not torch.allclose(fpr_[fpr_idx_].max(), fpr_limit):
+                tmp_idx_ = torch.searchsorted(fpr_, fpr_limit)
                 fpr_idx_ = torch.cat([fpr_idx_, tmp_idx_.unsqueeze_(0)])
-                slope_ = 1 - ((fpr_[tmp_idx_] - self.fpr_limit) / (fpr_[tmp_idx_] - fpr_[tmp_idx_ - 1]))
+                slope_ = 1 - ((fpr_[tmp_idx_] - fpr_limit) / (fpr_[tmp_idx_] - fpr_[tmp_idx_ - 1]))
                 interp = True
 
             fpr_ = fpr_[fpr_idx_]

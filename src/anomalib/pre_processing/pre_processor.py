@@ -23,6 +23,7 @@ workflows.
 """
 
 import torch
+import torch.nn.functional as F
 from lightning import Callback, LightningModule, Trainer
 from torch import nn
 from torchvision.transforms.v2 import Transform
@@ -86,10 +87,39 @@ class PreProcessor(nn.Module, Callback):
         # If batch is a dict (multimodal) --> Here you can implement modality-specific transforms if needed
         if isinstance(batch, dict):
             # Don't transform label or path fields
-            skip_keys = {"label", "image_path"}
+            skip_keys = {"label", "image_path", "mask_path", "mask"}
             for k, v in batch.items():
                 if k not in skip_keys and isinstance(v, torch.Tensor):
                     batch[k] = self.transform(v)
+
+            if isinstance(batch.get("mask"), torch.Tensor):
+                reference_tensor = None
+                for key in ("thermal", "image"):
+                    value = batch.get(key)
+                    if isinstance(value, torch.Tensor):
+                        reference_tensor = value
+                        break
+                if reference_tensor is None:
+                    for value in batch.values():
+                        if isinstance(value, torch.Tensor) and value.ndim >= 3:
+                            reference_tensor = value
+                            break
+
+                if reference_tensor is not None:
+                    target_hw = tuple(reference_tensor.shape[-2:])
+                    mask = batch["mask"]
+                    source_dtype = mask.dtype
+
+                    if mask.ndim == 2:
+                        resized = F.interpolate(mask[None, None].float(), size=target_hw, mode="nearest")[0, 0]
+                    elif mask.ndim == 3:
+                        resized = F.interpolate(mask[:, None].float(), size=target_hw, mode="nearest")[:, 0]
+                    elif mask.ndim == 4:
+                        resized = F.interpolate(mask.float(), size=target_hw, mode="nearest")
+                    else:
+                        resized = mask
+
+                    batch["mask"] = (resized > 0.5).to(source_dtype)
             return batch
 
         # If batch is a Batch object (unimodal)
