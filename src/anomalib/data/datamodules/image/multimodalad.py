@@ -43,6 +43,7 @@ class MultiModalDataModule(LightningDataModule):
         transform: Optional[Transform] = None,
         balance_object_classes: bool = False,
         stratify_object_classes: bool = False,
+        print_split_per_class: bool = False,
     ) -> None:
         super().__init__()
         self.root = Path(root)
@@ -60,6 +61,7 @@ class MultiModalDataModule(LightningDataModule):
         self.transform = transform
         self.balance_object_classes = balance_object_classes
         self.stratify_object_classes = stratify_object_classes
+        self.print_split_per_class = print_split_per_class
 
         self.train_data: Dataset | None = None #empty datasets
         self.val_data: Dataset | None = None
@@ -81,6 +83,23 @@ class MultiModalDataModule(LightningDataModule):
             if label_index + 1 < len(parts):
                 return parts[label_index + 1]
         return None
+
+    def _count_object_classes(self, dataset: MultiModalFolderDataset, indices: list[int]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for idx in indices:
+            sample = dataset.samples[idx]
+            paths = sample.get("paths", {})
+            ref_path = paths.get("thermal") or next(iter(paths.values()))
+            object_class = self._infer_object_class_from_path(Path(ref_path)) or "__unknown__"
+            counts[object_class] = counts.get(object_class, 0) + 1
+        return counts
+
+    @staticmethod
+    def _format_counts(counts: dict[str, int]) -> str:
+        if not counts:
+            return "(none)"
+        parts = [f"{k}={counts[k]}" for k in sorted(counts.keys())]
+        return ", ".join(parts)
 
     def setup(self, stage: str | None = None) -> None: #Builds the dataset with splits
         # 1) Vollständiges Dataset ohne Splits.
@@ -195,6 +214,22 @@ class MultiModalDataModule(LightningDataModule):
         if test_labels:
             assert any(y == 0 for y in test_labels), "Test split has no normal samples."
             assert any(y == 1 for y in test_labels), "Test split has no anomalous samples."
+
+        if self.print_split_per_class:
+            train_norm_counts = self._count_object_classes(full_dataset, train_norm_idx)
+            val_norm_counts = self._count_object_classes(full_dataset, val_norm_idx)
+            test_norm_counts = self._count_object_classes(full_dataset, test_norm_idx)
+            val_anom_counts = self._count_object_classes(full_dataset, val_anom_idx)
+            test_anom_counts = self._count_object_classes(full_dataset, test_anom_idx)
+
+            print("[PER-CLASS SPLIT]")
+            print("  normals:")
+            print(f"    train: {self._format_counts(train_norm_counts)}")
+            print(f"    val  : {self._format_counts(val_norm_counts)}")
+            print(f"    test : {self._format_counts(test_norm_counts)}")
+            print("  anoms:")
+            print(f"    val  : {self._format_counts(val_anom_counts)}")
+            print(f"    test : {self._format_counts(test_anom_counts)}")
 
         self.train_data = Subset(full_dataset, train_indices) #Subsets refer to the full dataset so data is not copied
         self.val_data = Subset(full_dataset, val_indices)
